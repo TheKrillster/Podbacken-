@@ -1,7 +1,9 @@
-name: Bygg APK
+name: Bygg Podbacken
 
 on:
   push:
+    paths:
+      - '**.zip'
   workflow_dispatch:
 
 permissions:
@@ -10,41 +12,73 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Hämta repot
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Uses the zip uploaded most recently, whatever the phone named it.
-      - name: Packa upp projektet
+      - name: Hitta senast uppladdade zip
+        id: zip
         run: |
-          latest="$(git log --diff-filter=AM --name-only --pretty=format: -- '*.zip' | grep -m1 . || true)"
-          if [ -n "$latest" ]; then
-            echo "Bygger från: $latest"
-            rm -rf Podbacken
-            unzip -o -q "$latest"
+          ZIP=$(git log -1 --name-only --pretty=format: -- '*.zip' | grep -v '^$' | head -1)
+          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then ZIP="Podbacken.zip"; fi
+          if [ ! -f "$ZIP" ]; then echo "::error::Hittar ingen zip-fil i repot"; exit 1; fi
+          echo "Använder: $ZIP"
+          echo "file=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Packa upp
+        id: src
+        run: |
+          rm -rf src && mkdir src
+          unzip -q "${{ steps.zip.outputs.file }}" -d src
+          ROOT=$(find src -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) -not -path '*/__MACOSX/*' | head -1 | xargs -r dirname)
+          if [ -z "$ROOT" ]; then echo "::error::Ingen settings.gradle(.kts) i zip-filen"; exit 1; fi
+          echo "Projektrot: $ROOT"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          if [ ! -f "$ROOT/app/podbacken.keystore" ]; then
+            echo "::warning::app/podbacken.keystore saknas – APK:n får inte den fasta signaturen"
           fi
 
-      - uses: actions/setup-java@v4
+      - name: Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: '17'
 
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.11.1"
+          gradle-version: '8.9'
 
-      - name: Bygg appen
+      - name: Bygg (assembleDebug)
+        working-directory: ${{ steps.src.outputs.root }}
         run: |
-          if [ -d Podbacken ]; then cd Podbacken; fi
-          gradle assembleDebug --no-daemon
-          cp "$(find . -name app-debug.apk | head -1)" "$GITHUB_WORKSPACE/Podbacken.apk"
+          set -o pipefail
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/bygglogg.txt"
+          else
+            gradle assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/bygglogg.txt"
+          fi
 
-      - name: Lägg ut APK-filen
+      - name: Spara bygglogg vid fel
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bygglogg
+          path: bygglogg.txt
+
+      - name: Döp om APK
+        run: |
+          APK=$(find "${{ steps.src.outputs.root }}" -path '*build/outputs/apk/debug/*.apk' | head -1)
+          if [ -z "$APK" ]; then echo "::error::Ingen APK hittades"; exit 1; fi
+          cp "$APK" Podbacken.apk
+
+      - name: Publicera under Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Podbacken ${{ github.run_number }}
+          name: Podbacken bygge ${{ github.run_number }}
           files: Podbacken.apk
-          make_latest: true
