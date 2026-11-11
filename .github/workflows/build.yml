@@ -1,36 +1,50 @@
-# This is a basic workflow to help you get started with Actions
+name: Bygg APK
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+permissions:
+  contents: write
+
 jobs:
-  # This workflow contains a single job called "build"
   build:
-    # The type of runner that the job will run on
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    timeout-minutes: 30
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      # Uses the zip uploaded most recently, whatever the phone named it.
+      - name: Packa upp projektet
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          latest="$(git log --diff-filter=AM --name-only --pretty=format: -- '*.zip' | grep -m1 . || true)"
+          if [ -n "$latest" ]; then
+            echo "Bygger från: $latest"
+            rm -rf Podbacken
+            unzip -o -q "$latest"
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Bygg appen
+        run: |
+          if [ -d Podbacken ]; then cd Podbacken; fi
+          gradle assembleDebug --no-daemon
+          cp "$(find . -name app-debug.apk | head -1)" "$GITHUB_WORKSPACE/Podbacken.apk"
+
+      - name: Lägg ut APK-filen
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Podbacken ${{ github.run_number }}
+          files: Podbacken.apk
+          make_latest: true
